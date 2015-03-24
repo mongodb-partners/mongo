@@ -41,6 +41,8 @@
 #include <string>
 #include <vector>
 
+#include <rocksdb/perf_context.h>
+
 #include "mongo/base/status.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/db/auth/action_set.h"
@@ -447,12 +449,15 @@ void OpDebug::reset() {
     executionTime = 0;
     nreturned = -1;
     responseLength = -1;
-}
 
+    rocksdb::SetPerfLevel(rocksdb::kEnableCount);
+    rocksdb::perf_context.Reset();
+}
 
 #define OPDEBUG_TOSTRING_HELP(x) \
     if (x >= 0)                  \
     s << " " #x ":" << (x)
+#define ROCKSDB_OPDEBUG_TOSTRING_HELP(x) s << " " #x ":" << (rocksdb::perf_context.x)
 #define OPDEBUG_TOSTRING_HELP_BOOL(x) \
     if (x)                            \
     s << " " #x ":" << (x)
@@ -528,11 +533,22 @@ string OpDebug::report(const CurOp& curop, const SingleThreadedLockStats& lockSt
         s << " reslen:" << responseLength;
     }
 
+
     {
         BSONObjBuilder locks;
         lockStats.report(&locks);
         s << " locks:" << locks.obj().toString();
     }
+
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(user_key_comparison_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(block_cache_hit_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(block_read_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(block_read_byte);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(internal_key_skipped_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(internal_delete_skipped_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(get_from_memtable_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(seek_on_memtable_count);
+    ROCKSDB_OPDEBUG_TOSTRING_HELP(seek_child_seek_count);
 
     s << " " << executionTime << "ms";
 
