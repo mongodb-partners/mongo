@@ -53,17 +53,29 @@ namespace mongo {
         class PrefixStrippingIterator : public rocksdb::Iterator {
         public:
             // baseIterator is consumed
-            PrefixStrippingIterator(std::string prefix, Iterator* baseIterator)
+            PrefixStrippingIterator(std::string prefix, Iterator* baseIterator,
+                                    std::function<void(PrefixStrippingIterator*)> deletionCallback)
                 : _prefix(std::move(prefix)),
                   _prefixSlice(_prefix.data(), _prefix.size()),
-                  _baseIterator(baseIterator) {}
+                  _baseIterator(baseIterator),
+                  _invalidated(false),
+                  _deletionCallback(std::move(deletionCallback)) {}
+
+            ~PrefixStrippingIterator() { _deletionCallback(this); }
+
+            void invalidate() { _invalidated = true; }
 
             virtual bool Valid() const {
                 return _baseIterator->Valid() && _baseIterator->key().starts_with(_prefixSlice);
             }
 
-            virtual void SeekToFirst() { _baseIterator->Seek(_prefixSlice); }
+            virtual void SeekToFirst() {
+                invariant(!_invalidated);
+                _baseIterator->Seek(_prefixSlice);
+            }
+
             virtual void SeekToLast() {
+                invariant(!_invalidated);
                 std::string nextPrefix = std::move(rocksGetNextPrefix(_prefix));
                 _baseIterator->Seek(nextPrefix);
                 if (!_baseIterator->Valid()) {
@@ -75,14 +87,21 @@ namespace mongo {
             }
 
             virtual void Seek(const rocksdb::Slice& target) {
+                invariant(!_invalidated);
                 std::unique_ptr<char[]> buffer(new char[_prefix.size() + target.size()]);
                 memcpy(buffer.get(), _prefix.data(), _prefix.size());
                 memcpy(buffer.get() + _prefix.size(), target.data(), target.size());
                 _baseIterator->Seek(rocksdb::Slice(buffer.get(), _prefix.size() + target.size()));
             }
 
-            virtual void Next() { _baseIterator->Next(); }
-            virtual void Prev() { _baseIterator->Prev(); }
+            virtual void Next() {
+                invariant(!_invalidated);
+                _baseIterator->Next();
+            }
+            virtual void Prev() {
+                invariant(!_invalidated);
+                _baseIterator->Prev();
+            }
 
             virtual rocksdb::Slice key() const {
                 rocksdb::Slice strippedKey = _baseIterator->key();
@@ -96,6 +115,8 @@ namespace mongo {
             std::string _prefix;
             rocksdb::Slice _prefixSlice;
             std::unique_ptr<Iterator> _baseIterator;
+            bool _invalidated;
+            std::function<void(PrefixStrippingIterator*)> _deletionCallback;
         };
 
     }  // anonymous namespace
@@ -190,6 +211,9 @@ namespace mongo {
             _snapshot = nullptr;
         }
         _myTransactionCount++;
+        for (auto iter : _liveIterators) {
+            reinterpret_cast<PrefixStrippingIterator*>(iter)->invalidate();
+        }
     }
 
     void RocksRecoveryUnit::_commit() {
@@ -264,13 +288,17 @@ namespace mongo {
         if (_writeBatch && _writeBatch->GetWriteBatch()->Count() > 0) {
             iterator = _writeBatch->NewIteratorWithBase(iterator);
         }
-        return new PrefixStrippingIterator(std::move(prefix), iterator);
+        auto prefixIterator = new PrefixStrippingIterator(
+            std::move(prefix), iterator,
+            [&](PrefixStrippingIterator* iter) { _liveIterators.erase(iter); });
+        _liveIterators.insert(static_cast<void*>(prefixIterator));
+        return prefixIterator;
     }
 
     rocksdb::Iterator* RocksRecoveryUnit::NewIteratorNoSnapshot(rocksdb::DB* db,
                                                                 std::string prefix) {
         auto iterator = db->NewIterator(rocksdb::ReadOptions());
-        return new PrefixStrippingIterator(std::move(prefix), iterator);
+        return new PrefixStrippingIterator(std::move(prefix), iterator, [] (PrefixStrippingIterator* iter) {});
     }
 
     void RocksRecoveryUnit::incrementCounter(const rocksdb::Slice& counterKey,

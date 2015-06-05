@@ -155,6 +155,8 @@ namespace mongo {
 
         RecordId _oplogReadTill;
 
+        std::set<void*> _liveIterators;
+
         static std::atomic<int> _totalLiveRecoveryUnits;
     };
 
