@@ -39,6 +39,7 @@
 #include <boost/shared_ptr.hpp>
 
 #include <rocksdb/slice.h>
+#include <rocksdb/utilities/write_batch_with_index.h>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/owned_pointer_vector.h"
@@ -52,7 +53,6 @@
 namespace rocksdb {
 class DB;
 class Snapshot;
-class WriteBatchWithIndex;
 class Comparator;
 class Status;
 class Slice;
@@ -158,7 +158,7 @@ private:
 
     RocksTransaction _transaction;
 
-    boost::scoped_ptr<rocksdb::WriteBatchWithIndex> _writeBatch;  // owned
+    rocksdb::WriteBatchWithIndex _writeBatch;
 
     // bare because we need to call ReleaseSnapshot when we're done with this
     const rocksdb::Snapshot* _snapshot;  // owned

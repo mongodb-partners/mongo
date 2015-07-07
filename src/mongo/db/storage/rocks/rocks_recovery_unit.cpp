@@ -176,7 +176,7 @@ RocksRecoveryUnit::RocksRecoveryUnit(RocksTransactionEngine* transactionEngine,
       _compactionScheduler(compactionScheduler),
       _durable(durable),
       _transaction(transactionEngine),
-      _writeBatch(),
+      _writeBatch(rocksdb::BytewiseComparator(), 0, true),
       _snapshot(NULL),
       _depth(0),
       _myTransactionCount(1) {
@@ -197,7 +197,7 @@ void RocksRecoveryUnit::commitUnitOfWork() {
         return;  // only outermost gets committed.
     }
 
-    if (_writeBatch) {
+    if (_writeBatch.GetWriteBatch()->Count() > 0) {
         _commit();
     }
 
@@ -212,6 +212,7 @@ void RocksRecoveryUnit::commitUnitOfWork() {
 
     _releaseSnapshot();
 }
+
 
 void RocksRecoveryUnit::endUnitOfWork() {
     _depth--;
@@ -235,16 +236,8 @@ void RocksRecoveryUnit::commitAndRestart() {
     commitUnitOfWork();
 }
 
-// lazily initialized because Recovery Units are sometimes initialized just for reading,
-// which does not require write batches
 rocksdb::WriteBatchWithIndex* RocksRecoveryUnit::writeBatch() {
-    if (!_writeBatch) {
-        // this assumes that default column family uses default comparator. change this if you
-        // change default column family's comparator
-        _writeBatch.reset(new rocksdb::WriteBatchWithIndex(rocksdb::BytewiseComparator(), 0, true));
-    }
-
-    return _writeBatch.get();
+    return &_writeBatch;
 }
 
 void RocksRecoveryUnit::setOplogReadTill(const RecordId& record) {
@@ -269,8 +262,7 @@ void RocksRecoveryUnit::_releaseSnapshot() {
 }
 
 void RocksRecoveryUnit::_commit() {
-    invariant(_writeBatch);
-    rocksdb::WriteBatch* wb = _writeBatch->GetWriteBatch();
+    rocksdb::WriteBatch* wb = _writeBatch.GetWriteBatch();
     for (auto pair : _deltaCounters) {
         auto& counter = pair.second;
         counter._value->fetch_add(counter._delta, std::memory_order::memory_order_relaxed);
@@ -288,7 +280,7 @@ void RocksRecoveryUnit::_commit() {
         _transaction.commit();
     }
     _deltaCounters.clear();
-    _writeBatch.reset();
+    _writeBatch.Clear();
 }
 
 void RocksRecoveryUnit::_abort() {
@@ -304,7 +296,7 @@ void RocksRecoveryUnit::_abort() {
     }
 
     _deltaCounters.clear();
-    _writeBatch.reset();
+    _writeBatch.Clear();
 
     _releaseSnapshot();
 }
@@ -321,8 +313,8 @@ const rocksdb::Snapshot* RocksRecoveryUnit::snapshot() {
 }
 
 rocksdb::Status RocksRecoveryUnit::Get(const rocksdb::Slice& key, std::string* value) {
-    if (_writeBatch && _writeBatch->GetWriteBatch()->Count() > 0) {
-        boost::scoped_ptr<rocksdb::WBWIIterator> wb_iterator(_writeBatch->NewIterator());
+    if (_writeBatch.GetWriteBatch()->Count() > 0) {
+        boost::scoped_ptr<rocksdb::WBWIIterator> wb_iterator(_writeBatch.NewIterator());
         wb_iterator->Seek(key);
         if (wb_iterator->Valid() && wb_iterator->Entry().key == key) {
             const auto& entry = wb_iterator->Entry();
@@ -343,10 +335,7 @@ rocksdb::Iterator* RocksRecoveryUnit::NewIterator(std::string prefix, bool isOpl
     rocksdb::ReadOptions options;
     options.iterate_upper_bound = upperBound.get();
     options.snapshot = snapshot();
-    auto iterator = _db->NewIterator(options);
-    if (_writeBatch && _writeBatch->GetWriteBatch()->Count() > 0) {
-        iterator = _writeBatch->NewIteratorWithBase(iterator);
-    }
+    auto iterator = _writeBatch.NewIteratorWithBase(_db->NewIterator(options));
     return new PrefixStrippingIterator(std::move(prefix),
                                        iterator,
                                        isOplog ? nullptr : _compactionScheduler,
