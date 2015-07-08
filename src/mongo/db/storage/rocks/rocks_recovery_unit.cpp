@@ -233,7 +233,9 @@ bool RocksRecoveryUnit::awaitCommit() {
 
 void RocksRecoveryUnit::commitAndRestart() {
     invariant(_depth == 0);
-    commitUnitOfWork();
+    _deltaCounters.clear();
+    _writeBatch.Clear();
+    _releaseSnapshot();
 }
 
 rocksdb::WriteBatchWithIndex* RocksRecoveryUnit::writeBatch() {
