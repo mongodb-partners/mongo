@@ -51,13 +51,14 @@
 
 namespace mongo {
 namespace {
-class PrefixStrippingIterator : public rocksdb::Iterator {
+class PrefixStrippingIterator : public RocksIterator {
 public:
     // baseIterator is consumed
     PrefixStrippingIterator(std::string prefix,
                             Iterator* baseIterator,
                             RocksCompactionScheduler* compactionScheduler,
-                            std::unique_ptr<rocksdb::Slice> upperBound)
+                            std::unique_ptr<rocksdb::Slice> upperBound,
+                            std::function<void(RocksIterator*)> deletionCallback)
         : _rocksdbSkippedDeletionsInitial(0),
           _prefix(std::move(prefix)),
           _nextPrefix(std::move(rocksGetNextPrefix(_prefix))),
@@ -65,8 +66,13 @@ public:
           _prefixSliceEpsilon(_prefix.data(), _prefix.size() + 1),
           _baseIterator(baseIterator),
           _compactionScheduler(compactionScheduler),
-          _upperBound(std::move(upperBound)) {
+          _upperBound(std::move(upperBound)),
+          _deletionCallback(std::move(deletionCallback)) {
         *_upperBound.get() = rocksdb::Slice(_nextPrefix);
+    }
+
+    ~PrefixStrippingIterator() {
+        _deletionCallback(this);
     }
 
     virtual bool Valid() const {
@@ -128,6 +134,17 @@ public:
         return _baseIterator->status();
     }
 
+    virtual rocksdb::Slice* GetUpperBound() override {
+        return _upperBound.get();
+    }
+
+    virtual void Refresh(rocksdb::Iterator* newBaseIterator) override {
+        if (_baseIterator->Valid()) {
+            newBaseIterator->Seek(_baseIterator->key());
+        }
+        _baseIterator.reset(newBaseIterator);
+    }
+
 private:
     void startOp() {
         if (_compactionScheduler == nullptr) {
@@ -159,9 +176,10 @@ private:
     // can be nullptr
     RocksCompactionScheduler* _compactionScheduler;  // not owned
     std::unique_ptr<rocksdb::Slice> _upperBound;
-};
 
-}  // anonymous namespace
+    std::function<void(RocksIterator*)> _deletionCallback;
+};
+}  // namespace
 
 std::atomic<int> RocksRecoveryUnit::_totalLiveRecoveryUnits(0);
 
@@ -260,6 +278,19 @@ void RocksRecoveryUnit::_releaseSnapshot() {
         _db->ReleaseSnapshot(_snapshot);
         _snapshot = nullptr;
     }
+
+    // force all live iterators to refresh their snapshots. this is supposed to be guaranteed by
+    // the higher-level API, but there's a bug currently. we should be able to remove this code
+    // when the bug is resolved.
+    // The bug is at https://jira.mongodb.org/browse/SERVER-18844
+    for (auto iter : _liveIterators) {
+        rocksdb::ReadOptions options;
+        options.iterate_upper_bound = iter->GetUpperBound();
+        options.snapshot = snapshot();
+        auto iterator = _writeBatch.NewIteratorWithBase(_db->NewIterator(options));
+        iter->Refresh(iterator);
+    }
+
     _myTransactionCount++;
 }
 
@@ -338,10 +369,14 @@ rocksdb::Iterator* RocksRecoveryUnit::NewIterator(std::string prefix, bool isOpl
     options.iterate_upper_bound = upperBound.get();
     options.snapshot = snapshot();
     auto iterator = _writeBatch.NewIteratorWithBase(_db->NewIterator(options));
-    return new PrefixStrippingIterator(std::move(prefix),
-                                       iterator,
-                                       isOplog ? nullptr : _compactionScheduler,
-                                       std::move(upperBound));
+    auto prefixIterator =
+        new PrefixStrippingIterator(std::move(prefix),
+                                    iterator,
+                                    isOplog ? nullptr : _compactionScheduler,
+                                    std::move(upperBound),
+                                    [&](RocksIterator* ri) { _liveIterators.erase(ri); });
+    _liveIterators.insert(prefixIterator);
+    return prefixIterator;
 }
 
 rocksdb::Iterator* RocksRecoveryUnit::NewIteratorNoSnapshot(rocksdb::DB* db, std::string prefix) {
@@ -349,7 +384,8 @@ rocksdb::Iterator* RocksRecoveryUnit::NewIteratorNoSnapshot(rocksdb::DB* db, std
     rocksdb::ReadOptions options;
     options.iterate_upper_bound = upperBound.get();
     auto iterator = db->NewIterator(options);
-    return new PrefixStrippingIterator(std::move(prefix), iterator, nullptr, std::move(upperBound));
+    return new PrefixStrippingIterator(
+        std::move(prefix), iterator, nullptr, std::move(upperBound), [&](RocksIterator*) {});
 }
 
 void RocksRecoveryUnit::incrementCounter(const rocksdb::Slice& counterKey,

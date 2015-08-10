@@ -30,6 +30,7 @@
 
 #include <atomic>
 #include <map>
+#include <set>
 #include <stack>
 #include <string>
 #include <vector>
@@ -39,6 +40,7 @@
 #include <boost/shared_ptr.hpp>
 
 #include <rocksdb/slice.h>
+#include <rocksdb/write_batch.h>
 #include <rocksdb/utilities/write_batch_with_index.h>
 
 #include "mongo/base/disallow_copying.h"
@@ -62,6 +64,17 @@ class Iterator;
 namespace mongo {
 
 class OperationContext;
+
+// Same as rocksdb::Iterator, but adds couple more functions
+class RocksIterator : public rocksdb::Iterator {
+public:
+    virtual ~RocksIterator() {}
+
+    virtual rocksdb::Slice* GetUpperBound() = 0;
+
+    virtual void Refresh(rocksdb::Iterator* newBaseIterator) = 0;
+};
+
 
 class RocksRecoveryUnit : public RecoveryUnit {
     MONGO_DISALLOW_COPYING(RocksRecoveryUnit);
@@ -172,6 +185,8 @@ private:
     uint64_t _myTransactionCount;
 
     RecordId _oplogReadTill;
+
+    std::set<RocksIterator*> _liveIterators;
 
     static std::atomic<int> _totalLiveRecoveryUnits;
 };
