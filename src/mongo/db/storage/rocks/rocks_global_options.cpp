@@ -79,6 +79,12 @@ Status RocksGlobalOptions::add(moe::OptionSection* options) {
                                    "true will make database inserts a bit slower.")
         .setDefault(moe::Value(false))
         .hidden();
+    rocksOptions.addOptionChaining("storage.rocksdb.counters",
+                                   "rocksdbCounters",
+                                   moe::Bool,
+                                   "If true, we will turn on RocksDB's advanced counters")
+        .setDefault(moe::Value(false))
+        .hidden();
 
     return options->addSection(rocksOptions);
 }
@@ -105,6 +111,11 @@ Status RocksGlobalOptions::store(const moe::Environment& params,
         rocksGlobalOptions.crashSafeCounters =
             params["storage.rocksdb.crashSafeCounters"].as<bool>();
         log() << "Crash safe counters: " << rocksGlobalOptions.crashSafeCounters;
+    }
+    if (params.count("storage.rocksdb.counters")) {
+        rocksGlobalOptions.counters =
+            params["storage.rocksdb.counters"].as<bool>();
+        log() << "Counters: " << rocksGlobalOptions.counters;
     }
 
     return Status::OK();
