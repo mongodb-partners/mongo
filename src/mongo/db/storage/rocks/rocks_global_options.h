@@ -50,6 +50,7 @@ public:
     std::string configString;
 
     bool crashSafeCounters;
+    bool counters;
 };
 
 extern RocksGlobalOptions rocksGlobalOptions;
